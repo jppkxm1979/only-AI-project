@@ -1,0 +1,165 @@
+name: Autonomous Keepalive
+
+on:
+  schedule:
+    - cron: "29 6 * * *"
+    - cron: "37 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: autonomous-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Load autonomy configuration
+        id: config
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("automation/autonomy.json", "r", encoding="utf-8") as handle:
+              cfg = json.load(handle)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"heartbeat_branch={cfg['heartbeat_branch']}\n")
+              handle.write(f"heartbeat_label={cfg['heartbeat_label']}\n")
+              handle.write(f"heartbeat_after_days_without_push={cfg['heartbeat_after_days_without_push']}\n")
+          PY
+
+      - name: Detect existing managed PR
+        id: existing_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const heartbeatBranch = '${{ steps.config.outputs.heartbeat_branch }}';
+            const heartbeatLabel = '${{ steps.config.outputs.heartbeat_label }}';
+            const proposalBranch = 'autonomy/proposal';
+            const proposalLabel = 'autonomous-evolution';
+            const { owner, repo } = context.repo;
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const match = prs.find((pr) => {
+              const hasManagedLabel = pr.labels.some((item) => item.name === heartbeatLabel || item.name === proposalLabel);
+              const hasManagedBranch = pr.head.ref === heartbeatBranch || pr.head.ref === proposalBranch;
+              return hasManagedLabel || hasManagedBranch;
+            });
+            core.setOutput('exists', match ? 'true' : 'false');
+
+      - name: Check whether repository needs keepalive activity
+        id: need
+        if: steps.existing_pr.outputs.exists != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const days = Number('${{ steps.config.outputs.heartbeat_after_days_without_push }}');
+            const { owner, repo } = context.repo;
+            const latest = await github.rest.repos.listCommits({
+              owner,
+              repo,
+              per_page: 1,
+            });
+            const latestCommit = latest.data[0];
+            if (!latestCommit) {
+              core.setOutput('needed', 'true');
+              return;
+            }
+            const lastPush = new Date(latestCommit.commit.committer.date).getTime();
+            const ageDays = (Date.now() - lastPush) / (1000 * 60 * 60 * 24);
+            core.setOutput('needed', ageDays >= days ? 'true' : 'false');
+            core.setOutput('age_days', ageDays.toFixed(2));
+
+      - name: Configure bot identity
+        if: steps.existing_pr.outputs.exists != 'true' && steps.need.outputs.needed == 'true'
+        run: |
+          git config user.name "autonomous-evolver[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create keepalive branch
+        if: steps.existing_pr.outputs.exists != 'true' && steps.need.outputs.needed == 'true'
+        run: |
+          branch_name='${{ steps.config.outputs.heartbeat_branch }}'
+          default_branch='${{ github.event.repository.default_branch }}'
+          git fetch origin "${default_branch}"
+          git checkout -B "${branch_name}" "origin/${default_branch}"
+
+      - name: Refresh heartbeat file
+        if: steps.existing_pr.outputs.exists != 'true' && steps.need.outputs.needed == 'true'
+        run: |
+          cat > HEARTBEAT.md <<EOF
+          # HEARTBEAT.md
+          
+          This file exists to keep the repository alive when no other autonomous change is ready.
+          
+          - purpose: preserve repository activity
+          - style: minimal and explicit
+          - owner: repository automation
+          - last_keepalive_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+
+      - name: Commit and push keepalive branch
+        if: steps.existing_pr.outputs.exists != 'true' && steps.need.outputs.needed == 'true'
+        run: |
+          if git diff --quiet; then
+            echo "No keepalive delta was produced."
+            exit 0
+          fi
+
+          branch_name='${{ steps.config.outputs.heartbeat_branch }}'
+          git add HEARTBEAT.md
+          git commit -m "chore: autonomous keepalive $(date -u +%F)"
+          git push --force-with-lease origin "${branch_name}"
+
+      - name: Create keepalive pull request
+        if: steps.existing_pr.outputs.exists != 'true' && steps.need.outputs.needed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = '${{ steps.config.outputs.heartbeat_branch }}';
+            const label = '${{ steps.config.outputs.heartbeat_label }}';
+            const { owner, repo } = context.repo;
+            const base = context.payload.repository.default_branch;
+            const pr = await github.rest.pulls.create({
+              owner,
+              repo,
+              title: 'chore: autonomous keepalive',
+              head: branch,
+              base,
+              body: [
+                'Autonomous keepalive PR.',
+                '',
+                '- created to avoid long inactivity',
+                '- intended to preserve scheduled automation health',
+              ].join('\n'),
+              maintainer_can_modify: false,
+            });
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: pr.data.number,
+              labels: [label],
+            });

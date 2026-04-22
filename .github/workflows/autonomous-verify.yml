@@ -1,0 +1,63 @@
+name: Autonomous Verify
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - autonomy/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autonomous-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Detect toolchain needs
+        id: tools
+        run: |
+          if [ -f package.json ]; then
+            echo "needs_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -f Cargo.toml ]; then
+            echo "needs_rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.tools.outputs.needs_node == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Rust
+        if: steps.tools.outputs.needs_rust == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Verify repository
+        run: |
+          python3 scripts/safety_scan.py
+          python3 scripts/verify_repo.py
