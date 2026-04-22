@@ -26,6 +26,7 @@ This repository is configured to evolve in a conservative, fail-closed way.
 - `GEMINI_API_KEY`
 
 Repository setup checklist: [OPERATIONS.md](C:/Users/Administrator/Documents/GitHub/only-AI-project/OPERATIONS.md)
+Fast checklist: [CHECKLIST.md](C:/Users/Administrator/Documents/GitHub/only-AI-project/CHECKLIST.md)
 
 ## Recommended Repository Settings
 
